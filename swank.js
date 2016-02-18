@@ -41,26 +41,19 @@ var CONFIG_FILE_NAME = "~/.swankjsrc";
 
 var cfg = new config.Config(CONFIG_FILE_NAME);
 var executive = new swh.Executive({ config: cfg });
-var console = { log: function(){} };
-var isEmbedded = !!module.parent;
 
 var swankServer = net.createServer(
   function (stream) {
     var handler = new swh.Handler(executive);
     var parser = new swp.SwankParser(
       function onMessage (message) {
-        handler.receive(message);
+          handler.receive(message);
       });
     handler.on(
       "response", function (response) {
         var responseBuf = swp.buildMessage(response);
         console.log("response: %s", responseBuf.toString());
         stream.write(responseBuf);
-      });
-    handler.on(
-      "quit", function (response) {
-        console.log("quit from client");
-        stream.end();
       });
     stream.on(
       "data", function (data) {
@@ -73,10 +66,7 @@ var swankServer = net.createServer(
         handler.removeAllListeners("response");
       });
   });
-exports.startSwankServer = function startSwankServer(port, host) {
-  swankServer.listen(port || 4005, host || "localhost");
-};
-if (!isEmbedded) exports.startSwankServer(process.argv[2], process.argv[3]);
+swankServer.listen(process.argv[2] || 4005, process.argv[3] || "localhost");
 
 function BrowserRemote (clientInfo, client) {
   var userAgent = ua.recognize(clientInfo.userAgent);
@@ -272,7 +262,27 @@ HttpListener.prototype.doProxyRequest = function doProxyRequest (targetUrl, requ
   request.headers["host"] = hostname + (port == 80 ? "" : ":" + port);
   delete request.headers["accept-encoding"]; // we don't want gzipped pages, do we?
 
-    var onResponse = function (proxyResponse) {
+  // note on http client error handling:
+  // http://rentzsch.tumblr.com/post/664884799/node-js-handling-refused-http-client-connections
+  var proxy = http.createClient(port, hostname);
+  proxy.addListener(
+    'error', function handleError (e) {
+      console.log("proxy error: %s", e);
+      if (done)
+        return;
+      if (headersSent) {
+        response.end();
+        return;
+      }
+      response.writeHead(502, {'Content-Type': 'text/plain; charset=utf-8'});
+      response.end("swank-js: unable to forward the request");
+  });
+
+  console.log("PROXY: %s %s", request.method, request.url);
+  var proxyRequest = proxy.request(request.method, request.url, request.headers);
+
+  proxyRequest.addListener(
+    'response', function (proxyResponse) {
       var contentType = proxyResponse.headers["content-type"];
       var statusCode = proxyResponse.statusCode;
       console.log("==> status %s", statusCode);
@@ -289,7 +299,7 @@ HttpListener.prototype.doProxyRequest = function doProxyRequest (targetUrl, requ
         response.writeHead(statusCode, headers);
         headersSent = true;
       }
-      proxyResponse.on(
+      proxyResponse.addListener(
         'data', function (chunk) {
           if (chunks !== null) {
             chunks.push(chunk);
@@ -301,7 +311,7 @@ HttpListener.prototype.doProxyRequest = function doProxyRequest (targetUrl, requ
           }
           response.write(chunk, 'binary');
         });
-      proxyResponse.on(
+      proxyResponse.addListener(
         'end', function() {
           if (chunks !== null) {
             console.log("^^MOD: %s %s", request.method, request.url);
@@ -325,41 +335,12 @@ HttpListener.prototype.doProxyRequest = function doProxyRequest (targetUrl, requ
           response.end();
           done = true;
         });
-    };
-  // note on http client error handling:
-    // http://rentzsch.tumblr.com/post/664884799/node-js-handling-refused-http-client-connections
-    
-    // this is deprecated
-    // var proxy = http.createClient(port, hostname);
-    var proxyRequest = http.request({
-	hostname:hostname, 
-	port:port, 
-	path:request.url,
-	method:request.method,
-	headers:request.headers, 
-    }, onResponse);
-    
-  proxyRequest.on(
-    'error', function handleError (e) {
-      console.log("proxy error: %s", e);
-      if (done)
-        return;
-      if (headersSent) {
-        response.end();
-        return;
-      }
-      response.writeHead(502, {'Content-Type': 'text/plain; charset=utf-8'});
-      response.end("swank-js: unable to forward the request");
-  });
-
-  console.log("PROXY: %s %s", request.method, request.url);
-  // var proxyRequest = proxy.request(request.method, request.url, request.headers);
-  
-  proxyRequest.on(
+    });
+  request.addListener(
     'data', function(chunk) {
       proxyRequest.write(chunk, 'binary');
     });
-  proxyRequest.on(
+  request.addListener(
     'end', function() {
       proxyRequest.end();
     });
@@ -467,33 +448,29 @@ HttpListener.prototype.serveClient = function serveClient(req, res) {
 var httpListener = new HttpListener(cfg);
 var httpServer = http.createServer(httpListener.serveClient.bind(httpListener));
 
-exports.startSocketIOServer = function startSocketIOServer(port, host) {
-  httpServer.listen(port || 8009, host);
-  io = io.listen(httpServer);
+httpServer.listen(8009);
+io = io.listen(httpServer);
 
-  io.sockets.on(
-    "connection", function (client) {
-      // new client is here!
-      console.log("client connected");
-      function handleHandshake (message) {
-        message = JSON.parse(message);
-        client.removeListener("message", handleHandshake);
-        if (!message.hasOwnProperty("op") || message.op != "handshake")
-          console.warn("WARNING: skipping pre-handshake message: %j", message);
-        else {
-          var address = null;
-          if (client.connection && client.connection.remoteAddress)
-            address = client.connection.remoteAddress || "noaddress";
-          var remote = new BrowserRemote({ address: address, userAgent: message.userAgent || "" }, client);
-          executive.attachRemote(remote);
-          console.log("added remote: %s", remote.fullName());
-        }
-      };
-      client.on("message", handleHandshake);
-    }
-  );
-};
-if (!isEmbedded) exports.startSocketIOServer(8009);
+io.sockets.on(
+  "connection", function (client) {
+    // new client is here!
+    console.log("client connected");
+    function handleHandshake (message) {
+      message = JSON.parse(message);
+      client.removeListener("message", handleHandshake);
+      if (!message.hasOwnProperty("op") || message.op != "handshake")
+        console.warn("WARNING: skipping pre-handshake message: %j", message);
+      else {
+        var address = null;
+        if (client.connection && client.connection.remoteAddress)
+          address = client.connection.remoteAddress || "noaddress";
+        var remote = new BrowserRemote({ address: address, userAgent: message.userAgent || "" }, client);
+        executive.attachRemote(remote);
+        console.log("added remote: %s", remote.fullName());
+      }
+    };
+    client.on("message", handleHandshake);
+  });
 
 // TBD: handle reader errors
 
